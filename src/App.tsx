@@ -1,693 +1,734 @@
-import { useState, useEffect, useRef } from 'react';
-import { Calendar as CalendarIcon, Terminal, Activity, Focus, X, ChevronLeft, ChevronRight, Zap, BarChart2 } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { 
+  Settings, Plus, ChevronLeft, ChevronRight, Activity, 
+  BrainCircuit, CheckCircle2, Play, Pause, RotateCcw, 
+  X, Target, BarChart3, CalendarDays, Check
+} from "lucide-react";
+import { 
+  format, addMonths, subMonths, isSameDay, isToday, getDate, 
+  getDaysInMonth, startOfMonth 
+} from "date-fns";
+import { motion, AnimatePresence } from "framer-motion";
+import { clsx, type ClassValue } from "clsx";
+import { twMerge } from "tailwind-merge";
 
-const CATEGORIES = {
-  GYM: { id: 'gym', label: 'PHYSICAL', hex: '#ccff00', border: 'border-[#ccff00]', text: 'text-[#ccff00]', bg: 'bg-[#ccff00]' },
-  STUDY: { id: 'study', label: 'COGNITIVE', hex: '#00e5ff', border: 'border-[#00e5ff]', text: 'text-[#00e5ff]', bg: 'bg-[#00e5ff]' },
-  WORK: { id: 'work', label: 'OUTPUT', hex: '#ff3d00', border: 'border-[#ff3d00]', text: 'text-[#ff3d00]', bg: 'bg-[#ff3d00]' },
-  SELF: { id: 'self', label: 'MAINTENANCE', hex: '#ff00a0', border: 'border-[#ff00a0]', text: 'text-[#ff00a0]', bg: 'bg-[#ff00a0]' }
+// --- CONSTANTS & CONFIG ---
+const HABIT_COLORS = {
+  red: { bg: 'bg-rose-500', text: 'text-rose-500', border: 'border-rose-500', ring: 'ring-rose-200' },
+  green: { bg: 'bg-emerald-500', text: 'text-emerald-500', border: 'border-emerald-500', ring: 'ring-emerald-200' },
+  yellow: { bg: 'bg-amber-400', text: 'text-amber-500', border: 'border-amber-400', ring: 'ring-amber-200' },
+  blue: { bg: 'bg-sky-500', text: 'text-sky-500', border: 'border-sky-500', ring: 'ring-sky-200' },
 } as const;
 
-type CategoryKey = keyof typeof CATEGORIES;
-type HabitCompleted = Record<string, boolean>;
-type EventMap = Record<string, string[]>;
+type HabitColor = keyof typeof HABIT_COLORS;
 
-type Habit = {
+// --- UTILITIES ---
+function cn(...inputs: ClassValue[]) {
+  return twMerge(clsx(inputs));
+}
+
+// --- TYPES ---
+interface Day {
+  date: Date;
+  isToday: boolean;
+  isSelected: boolean;
+}
+
+interface Priority {
+  id: number;
+  text: string;
+  done: boolean;
+}
+
+interface Habit {
   id: number;
   name: string;
-  category: CategoryKey;
-  completed: HabitCompleted;
-};
+  color: HabitColor;
+  done: Record<string, boolean>;
+}
 
-const INITIAL_HABITS: Habit[] = [
-  { id: 1, name: 'HYPERTROPHY_SPLIT', category: 'GYM', completed: {} },
-  { id: 2, name: 'SYS_SLEEP >= 7HR', category: 'GYM', completed: {} },
-  { id: 3, name: 'DEEP_LEARNING.RS', category: 'STUDY', completed: {} },
-  { id: 4, name: 'DEVPROVE_BUILD', category: 'WORK', completed: {} },
-  { id: 5, name: 'DISCONNECT_WIFI', category: 'SELF', completed: {} },
-];
+// --- CLEAN CALENDAR COMPONENT ---
+const ScrollbarHide = () => (
+  <style>{`
+    .scrollbar-hide::-webkit-scrollbar { display: none; }
+    .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+  `}</style>
+);
 
-export default function App() {
-  // State Initialization
-  const [currentDate, setCurrentDate] = useState(new Date());
-  const [habits, setHabits] = useState<Habit[]>(INITIAL_HABITS);
-  const [events, setEvents] = useState<EventMap>({});
-  const [priorities, setPriorities] = useState<string[]>(['DEPLOY BETA VERSION', 'PARSE 2 RESEARCH PAPERS', 'BENCH PRESS PR']);
-  const [notes, setNotes] = useState('');
-  
-  const [selectedDay, setSelectedDay] = useState<number | null>(null);
-  const [newEventText, setNewEventText] = useState('');
-  const [sysTime, setSysTime] = useState('');
-  const [isDataLoaded, setIsDataLoaded] = useState(false);
+interface CleanCalendarProps extends React.HTMLAttributes<HTMLDivElement> {
+  selectedDate?: Date;
+  onDateSelect?: (date: Date) => void;
+  events?: Record<string, string[]>;
+}
 
-  // Habit Management States
-  const [newHabitName, setNewHabitName] = useState('');
-  const [newHabitCategory, setNewHabitCategory] = useState<CategoryKey>('GYM');
-  const [editingHabitId, setEditingHabitId] = useState<number | null>(null);
-  const [editingHabitName, setEditingHabitName] = useState('');
+const CleanCalendar = React.forwardRef<HTMLDivElement, CleanCalendarProps>(
+  ({ className, selectedDate: propSelectedDate, onDateSelect, events = {}, ...props }, ref) => {
+    const [currentMonth, setCurrentMonth] = React.useState(propSelectedDate || new Date());
+    const [selectedDate, setSelectedDate] = React.useState(propSelectedDate || new Date());
 
-  // Event Edit States
-  const [editingEventId, setEditingEventId] = useState<string | null>(null);
-  const [editingEventText, setEditingEventText] = useState('');
+    const monthDays = React.useMemo(() => {
+        const start = startOfMonth(currentMonth);
+        const totalDays = getDaysInMonth(currentMonth);
+        const days: Day[] = [];
+        for (let i = 0; i < totalDays; i++) {
+            const date = new Date(start.getFullYear(), start.getMonth(), i + 1);
+            days.push({
+                date,
+                isToday: isToday(date),
+                isSelected: isSameDay(date, selectedDate),
+            });
+        }
+        return days;
+    }, [currentMonth, selectedDate]);
 
-  // Terminal Line Numbers Ref
-  const lineNumbersRef = useRef<HTMLDivElement | null>(null);
-
-  // 1. Local Storage: Load Data (Runs once on mount, safe for Vercel SSR)
-  useEffect(() => {
-    const loadData = () => {
-      const savedHabits = localStorage.getItem('cmd_habits');
-      const savedEvents = localStorage.getItem('cmd_events');
-      const savedPriorities = localStorage.getItem('cmd_priorities');
-      const savedNotes = localStorage.getItem('cmd_notes');
-
-      if (savedHabits) setHabits(JSON.parse(savedHabits));
-      if (savedEvents) setEvents(JSON.parse(savedEvents));
-      if (savedPriorities) setPriorities(JSON.parse(savedPriorities));
-      if (savedNotes) setNotes(savedNotes);
-      
-      setIsDataLoaded(true);
+    const handleDateClick = (date: Date) => {
+      setSelectedDate(date);
+      onDateSelect?.(date);
     };
-    loadData();
-    setSysTime(new Date().toLocaleTimeString()); // Init time on client
+    
+    const handlePrevMonth = () => setCurrentMonth(subMonths(currentMonth, 1));
+    const handleNextMonth = () => setCurrentMonth(addMonths(currentMonth, 1));
+
+    return (
+      <div
+        ref={ref}
+        className={cn(
+          "w-full bg-gradient-to-br from-white/90 to-white/50 backdrop-blur-2xl rounded-3xl p-6 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.06)] border border-white/60",
+          className
+        )}
+        {...props}
+      >
+        <ScrollbarHide />
+        
+        {/* Header */}
+        <div className="flex items-center justify-between mb-2">
+          <div className="flex items-center space-x-2">
+            <CalendarDays className="w-5 h-5 text-slate-400" />
+            <h2 className="text-lg font-semibold text-slate-800 tracking-tight">Timeline</h2>
+          </div>
+          <button className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-50/50 rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-slate-200">
+            <Settings className="h-4 w-4" />
+          </button>
+        </div>
+
+        {/* Month Navigation */}
+        <div className="my-5 flex items-center justify-between">
+            <AnimatePresence mode="wait">
+              <motion.p 
+                key={format(currentMonth, "MMMM")}
+                initial={{ opacity: 0, y: -5 }} 
+                animate={{ opacity: 1, y: 0 }} 
+                exit={{ opacity: 0, y: 5 }}
+                transition={{ duration: 0.2 }}
+                className="text-2xl font-bold text-slate-900 tracking-tight"
+              >
+                  {format(currentMonth, "MMMM")} <span className="text-slate-400 font-medium">{format(currentMonth, "yyyy")}</span>
+              </motion.p>
+            </AnimatePresence>
+            <div className="flex items-center space-x-1">
+                <button onClick={handlePrevMonth} className="p-2 rounded-full text-slate-400 hover:text-slate-700 hover:bg-white/60 transition-colors focus:outline-none focus:ring-2 focus:ring-slate-200">
+                    <ChevronLeft className="h-5 w-5" />
+                </button>
+                <button onClick={handleNextMonth} className="p-2 rounded-full text-slate-400 hover:text-slate-700 hover:bg-white/60 transition-colors focus:outline-none focus:ring-2 focus:ring-slate-200">
+                    <ChevronRight className="h-5 w-5" />
+                </button>
+            </div>
+        </div>
+
+        {/* Scrollable Monthly Calendar Grid */}
+        <div className="overflow-x-auto scrollbar-hide -mx-6 px-6 relative">
+            <div className="flex space-x-3 pb-2 min-w-max">
+                {monthDays.map((day) => {
+                    const dateKey = format(day.date, "yyyy-MM-dd");
+                    const hasEvents = (events[dateKey] || []).length > 0;
+                    
+                    return (
+                    <div key={dateKey} className="flex flex-col items-center space-y-2 flex-shrink-0">
+                        <span className="text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                            {format(day.date, "E").charAt(0)}
+                        </span>
+                        <button
+                            onClick={() => handleDateClick(day.date)}
+                            className={cn(
+                                "flex h-11 w-11 items-center justify-center rounded-2xl text-sm font-medium transition-all duration-300 relative focus:outline-none",
+                                {
+                                    "bg-slate-900 text-white shadow-lg shadow-slate-900/20 scale-105 font-bold": day.isSelected,
+                                    "hover:bg-white text-slate-600": !day.isSelected,
+                                    "bg-white/60 text-slate-900 ring-1 ring-inset ring-slate-200": day.isToday && !day.isSelected,
+                                }
+                            )}
+                        >
+                            {day.isToday && !day.isSelected && (
+                                <span className="absolute bottom-1.5 h-1 w-1 rounded-full bg-slate-900"></span>
+                            )}
+                            {hasEvents && !day.isSelected && (
+                                <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-sky-500 ring-2 ring-white"></span>
+                            )}
+                            {hasEvents && day.isSelected && (
+                                <span className="absolute top-2 right-2 h-1.5 w-1.5 rounded-full bg-white"></span>
+                            )}
+                            {getDate(day.date)}
+                        </button>
+                    </div>
+                )})}
+            </div>
+        </div>
+      </div>
+    );
+  }
+);
+CleanCalendar.displayName = "CleanCalendar";
+
+// --- MAIN APP COMPONENT ---
+export default function App() {
+  const [isLoaded, setIsLoaded] = useState(false);
+  const [selectedDate, setSelectedDate] = useState(new Date());
+
+  const [priorities, setPriorities] = useState<Priority[]>([]);
+  const [habits, setHabits] = useState<Habit[]>([]);
+  const [events, setEvents] = useState<Record<string, string[]>>({});
+  const [notes, setNotes] = useState('');
+
+  const [newEvent, setNewEvent] = useState('');
+  const [newHabitName, setNewHabitName] = useState('');
+  const [newHabitColor, setNewHabitColor] = useState<HabitColor>('green');
+  
+  // Timer State & Settings
+  const [timerRunning, setTimerRunning] = useState(false);
+  const [timerMode, setTimerMode] = useState<'focus' | 'break'>('focus');
+  const [focusMinutes, setFocusMinutes] = useState(25);
+  const [breakMinutes, setBreakMinutes] = useState(5);
+  const [timerSeconds, setTimerSeconds] = useState(25 * 60);
+  const [isEditingTimer, setIsEditingTimer] = useState(false);
+
+  // Initialization
+  useEffect(() => {
+    const defaultPriorities = [
+      { id: 1, text: 'Identify the most important task', done: false },
+      { id: 2, text: 'Drink a glass of water', done: false },
+      { id: 3, text: 'Clear physical workspace', done: false },
+    ];
+    const defaultHabits: Habit[] = [
+      { id: 1, name: 'Medication / Supplements', color: 'blue', done: {} },
+      { id: 2, name: '15 Min Walk', color: 'green', done: {} },
+    ];
+
+    try {
+      setPriorities(JSON.parse(localStorage.getItem('adhd_premium_prio') || 'null') || defaultPriorities);
+      
+      const loadedHabits = JSON.parse(localStorage.getItem('adhd_premium_habits') || 'null');
+      if (loadedHabits) {
+        setHabits(loadedHabits.map((h: any) => ({ ...h, color: h.color || 'blue' })));
+      } else {
+        setHabits(defaultHabits);
+      }
+      
+      setEvents(JSON.parse(localStorage.getItem('adhd_premium_events') || 'null') || {});
+      setNotes(localStorage.getItem('adhd_premium_notes') || '');
+
+      const savedFocus = Number(localStorage.getItem('adhd_premium_focus_min'));
+      const savedBreak = Number(localStorage.getItem('adhd_premium_break_min'));
+      
+      if (savedFocus > 0) {
+        setFocusMinutes(savedFocus);
+        setTimerSeconds(savedFocus * 60);
+      }
+      if (savedBreak > 0) setBreakMinutes(savedBreak);
+
+    } catch {
+      setPriorities(defaultPriorities);
+      setHabits(defaultHabits);
+    }
+    setIsLoaded(true);
   }, []);
 
-  // 2. Local Storage: Save Data (Runs whenever state changes)
+  // Save State
   useEffect(() => {
-    if (!isDataLoaded) return; // Prevent overwriting with initial state before load
-    localStorage.setItem('cmd_habits', JSON.stringify(habits));
-    localStorage.setItem('cmd_events', JSON.stringify(events));
-    localStorage.setItem('cmd_priorities', JSON.stringify(priorities));
-    localStorage.setItem('cmd_notes', notes);
-  }, [habits, events, priorities, notes, isDataLoaded]);
+    if (!isLoaded) return;
+    localStorage.setItem('adhd_premium_prio', JSON.stringify(priorities));
+    localStorage.setItem('adhd_premium_habits', JSON.stringify(habits));
+    localStorage.setItem('adhd_premium_events', JSON.stringify(events));
+    localStorage.setItem('adhd_premium_notes', notes);
+    localStorage.setItem('adhd_premium_focus_min', String(focusMinutes));
+    localStorage.setItem('adhd_premium_break_min', String(breakMinutes));
+  }, [priorities, habits, events, notes, focusMinutes, breakMinutes, isLoaded]);
 
-  // Clock effect
+  // Timer Effect
   useEffect(() => {
-    const timer = setInterval(() => setSysTime(new Date().toLocaleTimeString()), 1000);
-    return () => clearInterval(timer);
-  }, []);
-
-  // Calendar Logic
-  const year = currentDate.getFullYear();
-  const month = currentDate.getMonth();
-  const daysInMonth = new Date(year, month + 1, 0).getDate();
-  const firstDayOfMonth = new Date(year, month, 1).getDay();
-  const monthName = currentDate.toLocaleString('default', { month: 'long' }).toUpperCase();
-
-  // Telemetry Logic (Graph Data Calculation)
-  const graphData = Array.from({ length: daysInMonth }).map((_, i) => {
-    const day = i + 1;
-    const dateKey = `${year}-${month}-${day}`;
-    const completedHabits = habits.filter(habit => habit.completed[dateKey]);
-    return { day, completedHabits, count: completedHabits.length };
-  });
-  const maxAchieved = Math.max(...graphData.map(d => d.count), 1);
-  const yAxisScale = Math.max(3, maxAchieved); // Dynamic scaling: ensures bars are thick
-
-  const prevMonth = () => setCurrentDate(new Date(year, month - 1, 1));
-  const nextMonth = () => setCurrentDate(new Date(year, month + 1, 1));
+    if (!timerRunning) return;
+    const id = setInterval(() => {
+      setTimerSeconds(prev => {
+        if (prev <= 1) {
+          const nextMode = timerMode === 'focus' ? 'break' : 'focus';
+          setTimerMode(nextMode);
+          return nextMode === 'focus' ? focusMinutes * 60 : breakMinutes * 60;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, [timerRunning, timerMode, focusMinutes, breakMinutes]);
 
   // Handlers
-  const toggleHabit = (habitId: number, day: number) => {
-    const dateKey = `${year}-${month}-${day}`;
-    setHabits(habits.map(habit => {
-      if (habit.id === habitId) {
-        const newCompleted = { ...habit.completed };
-        newCompleted[dateKey] = !newCompleted[dateKey];
-        return { ...habit, completed: newCompleted };
-      }
-      return habit;
-    }));
-  };
-
-  const addEvent = (e: React.FormEvent<HTMLFormElement>) => {
-    e.preventDefault();
-    if (!selectedDay || !newEventText.trim()) return;
-    const dateKey = `${year}-${month}-${selectedDay}`;
-    setEvents(prev => ({
-      ...prev,
-      [dateKey]: [...(prev[dateKey] || []), newEventText.trim().toUpperCase()]
-    }));
-    setNewEventText('');
-  };
-
-  const removeEvent = (dateKey: string, index: number) => {
-    setEvents(prev => ({
-      ...prev,
-      [dateKey]: (prev[dateKey] || []).filter((_, i) => i !== index)
-    }));
-  };
-
-  const startEditEvent = (dateKey: string, index: number, text: string) => {
-    setEditingEventId(`${dateKey}-${index}`);
-    setEditingEventText(text);
-  };
-
-  const saveEditEvent = (dateKey: string, index: number) => {
-    if (!editingEventText.trim()) {
-      removeEvent(dateKey, index);
+  const handleTimerChange = (type: 'focus' | 'break', val: string) => {
+    const mins = Math.max(1, Math.min(120, Number(val) || 1));
+    if (type === 'focus') {
+      setFocusMinutes(mins);
+      if (timerMode === 'focus' && !timerRunning) setTimerSeconds(mins * 60);
     } else {
-      setEvents(prev => {
-        const dayEvents = [...(prev[dateKey] || [])];
-        dayEvents[index] = editingEventText.trim().toUpperCase();
-        return { ...prev, [dateKey]: dayEvents };
-      });
+      setBreakMinutes(mins);
+      if (timerMode === 'break' && !timerRunning) setTimerSeconds(mins * 60);
     }
-    setEditingEventId(null);
   };
 
-  const updatePriority = (index: number, value: string) => {
-    const newPriorities = [...priorities];
-    newPriorities[index] = value.toUpperCase();
-    setPriorities(newPriorities);
+  const togglePriority = (id: number) => setPriorities(prev => prev.map(p => p.id === id ? { ...p, done: !p.done } : p));
+  const editPriority = (id: number, text: string) => setPriorities(prev => prev.map(p => p.id === id ? { ...p, text } : p));
+  
+  const toggleHabit = (id: number, dateStr: string) => {
+    setHabits(prev => prev.map(h => h.id === id ? { ...h, done: { ...h.done, [dateStr]: !h.done[dateStr] } } : h));
   };
+  const deleteHabit = (id: number) => setHabits(prev => prev.filter(h => h.id !== id));
 
-  // Habit Management Handlers
-  const addHabit = (e: React.FormEvent<HTMLFormElement>) => {
+  const addEvent = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newHabitName.trim()) return;
-    setHabits([...habits, { id: Date.now(), name: newHabitName.trim().toUpperCase(), category: newHabitCategory, completed: {} }]);
-    setNewHabitName('');
+    if (!newEvent.trim()) return;
+    const dk = format(selectedDate, "yyyy-MM-dd");
+    setEvents(prev => ({ ...prev, [dk]: [...(prev[dk] || []), newEvent.trim()] }));
+    setNewEvent('');
   };
 
-  const deleteHabit = (id: number) => {
-    setHabits(habits.filter(h => h.id !== id));
-  };
+  if (!isLoaded) return null;
 
-  const startEditHabit = (habit: Habit) => {
-    setEditingHabitId(habit.id);
-    setEditingHabitName(habit.name);
-  };
+  // Derived Data
+  const selectedDateKey = format(selectedDate, "yyyy-MM-dd");
+  const selectedDayEvents = events[selectedDateKey] || [];
+  
+  const daysInCurrentMonth = getDaysInMonth(new Date());
+  
+  // Data for the entire current month
+  const currentMonthDays = Array.from({ length: daysInCurrentMonth }).map((_, i) => {
+    const dObj = new Date(new Date().getFullYear(), new Date().getMonth(), i + 1);
+    return {
+      day: i + 1,
+      dateStr: format(dObj, 'yyyy-MM-dd'),
+      isToday: isToday(dObj)
+    };
+  });
 
-  const saveEditHabit = (id: number) => {
-    if (!editingHabitName.trim()) {
-      setEditingHabitId(null);
-      return;
-    }
-    setHabits(habits.map(h => h.id === id ? { ...h, name: editingHabitName.trim().toUpperCase() } : h));
-    setEditingHabitId(null);
-  };
-
-  // Terminal Scroll Sync
-  const handleNotesScroll = (e: React.UIEvent<HTMLTextAreaElement>) => {
-    if (lineNumbersRef.current) {
-      lineNumbersRef.current.scrollTop = e.currentTarget.scrollTop;
-    }
-  };
-
-  // Prevent rendering UI until client-side data is loaded (prevents hydration mismatch on Vercel)
-  if (!isDataLoaded) return <div className="min-h-screen bg-[#050505] flex items-center justify-center font-mono text-[#ccff00]">INITIALIZING_SYSTEM...</div>;
+  const graphData = currentMonthDays.map(d => ({
+    ...d,
+    completedHabits: habits.filter(h => h.done[d.dateStr])
+  }));
+  
+  const maxAchieved = Math.max(...graphData.map(d => d.completedHabits.length), 1);
 
   return (
-    <div className="min-h-screen bg-[#050505] text-[#e0e0e0] p-2 sm:p-4 md:p-8 relative overflow-hidden font-mono selection:bg-[#ccff00] selection:text-black">
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans antialiased selection:bg-rose-200/50 relative overflow-hidden">
       
-      {/* CSS Imports & Brutalist Styles */}
-      <style dangerouslySetInnerHTML={{__html: `
-        @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,600;1,400&display=swap');
+      {/* Dynamic Warm Ambient Background */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none z-0">
+        <div className="absolute -top-[20%] -left-[10%] w-[50%] h-[50%] rounded-full bg-gradient-to-br from-rose-200/40 to-orange-100/40 blur-[100px]" />
+        <div className="absolute -bottom-[20%] -right-[10%] w-[60%] h-[60%] rounded-full bg-gradient-to-tl from-amber-200/40 via-yellow-100/30 to-transparent blur-[120px]" />
+        <div className="absolute top-[30%] left-[20%] w-[40%] h-[40%] rounded-full bg-gradient-to-tr from-pink-100/30 to-transparent blur-[100px]" />
+      </div>
 
-        .font-bebas { font-family: 'Bebas Neue', sans-serif; letter-spacing: 0.05em; }
-        .font-plex { font-family: 'IBM Plex Mono', monospace; }
-
-        .bg-noise {
-          position: fixed;
-          top: 0; left: 0; width: 100vw; height: 100vh;
-          pointer-events: none;
-          z-index: 50;
-          opacity: 0.03;
-          background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
-        }
-
-        .bg-grid {
-          background-size: 40px 40px;
-          background-image: 
-            linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
-            linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
-        }
-
-        ::-webkit-scrollbar { width: 6px; height: 6px; }
-        ::-webkit-scrollbar-track { background: #050505; border: 1px solid #222; }
-        ::-webkit-scrollbar-thumb { background: #333; }
-        ::-webkit-scrollbar-thumb:hover { background: #ccff00; }
-
-        .glitch-hover:hover {
-          animation: rgb-shift 0.3s cubic-bezier(.25, .46, .45, .94) both infinite;
-        }
-
-        @keyframes rgb-shift {
-          0% { text-shadow: 2px 0 0 red, -2px 0 0 blue; }
-          25% { text-shadow: -2px 0 0 red, 2px 0 0 blue; }
-          50% { text-shadow: 2px 0 0 red, -2px 0 0 blue; }
-          75% { text-shadow: -2px 0 0 red, 2px 0 0 blue; }
-          100% { text-shadow: 0 0 0 red, 0 0 0 blue; }
-        }
-
-        .stagger-in {
-          animation: fade-in-up 0.4s ease-out forwards;
-          opacity: 0;
-          transform: translateY(10px);
-        }
-
-        @keyframes fade-in-up {
-          to { opacity: 1; transform: translateY(0); }
-        }
-
-        *:focus { outline: none; box-shadow: none; }
-        input:focus, textarea:focus { border-color: #ccff00 !important; background: rgba(204, 255, 0, 0.05); }
-
-        /* Sync text metrics for terminal */
-        .terminal-metrics {
-          font-size: 14px !important;
-          line-height: 24px !important;
-          padding-top: 8px !important;
-          padding-bottom: 8px !important;
-        }
-      `}} />
-
-      <div className="bg-noise"></div>
-      <div className="absolute inset-0 bg-grid pointer-events-none z-0"></div>
-
-      <div className="max-w-[1600px] mx-auto relative z-10 flex flex-col gap-6">
+      {/* Subtle Dot Grid Background */}
+      <div 
+        className="absolute inset-0 pointer-events-none opacity-[0.04] z-0"
+        style={{
+          backgroundImage: 'radial-gradient(circle at 2px 2px, #000 1px, transparent 0)',
+          backgroundSize: '32px 32px'
+        }}
+      />
+      
+      <div className="max-w-7xl mx-auto p-4 md:p-8 lg:p-10 flex flex-col gap-10 relative z-10">
         
-        {/* HEADER */}
-        <header className="flex flex-col md:flex-row items-start md:items-end justify-between border-b-2 border-white pb-4 mb-2 stagger-in">
-          <div className="flex flex-col">
-            <span className="text-[#ccff00] text-xs font-bold tracking-widest mb-1 flex items-center gap-2">
-              <Zap className="w-3 h-3 fill-[#ccff00]" /> LOCAL_STORAGE_ACTIVE // SECURE
-            </span>
-            <h1 className="font-bebas text-5xl sm:text-6xl md:text-8xl leading-none tracking-tight text-white uppercase glitch-hover cursor-default">
-              CMD_CENTER
-            </h1>
-          </div>
-          <div className="mt-4 md:mt-0 flex flex-col items-start md:items-end w-full md:w-auto border-t md:border-none border-gray-800 pt-4 md:pt-0">
-            <div className="font-bebas text-3xl sm:text-4xl text-[#333]">{year} // {sysTime || '00:00:00'}</div>
-            <div className="text-sm text-gray-400 mt-1 uppercase border border-gray-800 px-2 py-1 bg-black">
-              LOC: {currentDate.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: '2-digit' }).toUpperCase()}
-            </div>
-          </div>
+        {/* HEADER: Calm & Clear */}
+        <header className="flex flex-col gap-2 pt-4">
+          <motion.h1 
+            initial={{ opacity: 0, y: -10 }} animate={{ opacity: 1, y: 0 }}
+            className="text-3xl md:text-5xl font-bold tracking-tight text-slate-900"
+          >
+            Welcome back.
+          </motion.h1>
+          <motion.p 
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }}
+            className="text-base text-slate-500 max-w-2xl font-medium"
+          >
+            This is your clean space. <strong className="text-slate-800">1.</strong> Focus on 3 priorities. <strong className="text-slate-800">2.</strong> Track routines. <strong className="text-slate-800">3.</strong> Clear your mind.
+          </motion.p>
         </header>
 
-        {/* MAIN LAYOUT */}
-        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+        {/* MAIN LAYOUT: 3 Columns on Desktop */}
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-8 items-start">
           
-          {/* COLUMN 1: MACRO CALENDAR (Span 7) */}
-          <section className="xl:col-span-7 bg-[#0a0a0a] border border-[#333] p-1 stagger-in" style={{ animationDelay: '0.1s' }}>
-            <div className="border border-[#222] p-4 h-full relative">
-              <div className="absolute top-0 left-0 w-2 h-2 border-t border-l border-[#ccff00]"></div>
-              <div className="absolute top-0 right-0 w-2 h-2 border-t border-r border-[#ccff00]"></div>
+          {/* COLUMN 1: FOCUS & PRIORITIES (Span 4) */}
+          <div className="xl:col-span-4 flex flex-col gap-8">
+            
+            {/* Priorities Panel */}
+            <div className="bg-gradient-to-br from-white/90 to-white/50 backdrop-blur-2xl rounded-3xl p-7 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.06)] border border-white/60 relative overflow-hidden">
+              <div className="absolute top-0 right-0 w-32 h-32 bg-slate-50/50 rounded-full blur-3xl -mr-10 -mt-10 pointer-events-none"></div>
               
-              <div className="flex flex-wrap gap-4 justify-between items-end mb-6 border-b border-[#333] pb-4">
-                <h2 className="font-bebas text-3xl sm:text-4xl text-white flex items-center gap-3">
-                  <CalendarIcon className="w-5 h-5 sm:w-6 sm:h-6 text-gray-500" /> MACRO_TIMELINE
-                </h2>
-                <div className="flex items-center gap-2 bg-[#111] border border-[#333] p-1 w-full sm:w-auto justify-between">
-                  <button onClick={prevMonth} className="px-2 py-1 hover:bg-[#333] text-gray-400 hover:text-white transition-colors">
-                    <ChevronLeft className="w-4 h-4" />
-                  </button>
-                  <span className="font-bebas text-xl sm:text-2xl w-24 sm:w-32 text-center text-[#ccff00] pt-1">{monthName}</span>
-                  <button onClick={nextMonth} className="px-2 py-1 hover:bg-[#333] text-gray-400 hover:text-white transition-colors">
-                    <ChevronRight className="w-4 h-4" />
-                  </button>
-                </div>
+              <div className="flex items-center gap-3 mb-8 relative z-10">
+                <Target className="w-5 h-5 text-slate-400" />
+                <h2 className="text-lg font-semibold text-slate-800 tracking-tight">Top 3 Priorities</h2>
+              </div>
+              
+              <div className="flex flex-col gap-5 relative z-10">
+                {priorities.map((p, i) => (
+                  <div key={p.id} className="flex items-center gap-4 group">
+                    <button 
+                      onClick={() => togglePriority(p.id)}
+                      className={cn(
+                        "w-6 h-6 rounded-full border-2 flex items-center justify-center shrink-0 transition-all duration-300 outline-none focus-visible:ring-2 focus-visible:ring-slate-300 focus-visible:ring-offset-2",
+                        p.done ? "bg-slate-900 border-slate-900 text-white scale-110 shadow-md shadow-slate-900/20" : "border-slate-200 hover:border-slate-400 text-transparent bg-white/50"
+                      )}
+                    >
+                      <motion.div
+                        initial={false}
+                        animate={{ scale: p.done ? 1 : 0, opacity: p.done ? 1 : 0 }}
+                        transition={{ type: "spring", stiffness: 300, damping: 20 }}
+                      >
+                        <Check className="w-3.5 h-3.5 stroke-[3]" />
+                      </motion.div>
+                    </button>
+                    <div className="relative flex-1">
+                      <input
+                        value={p.text}
+                        onChange={e => editPriority(p.id, e.target.value)}
+                        className={cn(
+                          "bg-transparent border-none outline-none text-base w-full transition-all duration-300 placeholder:text-slate-300",
+                          p.done ? "text-slate-400" : "text-slate-700 font-medium"
+                        )}
+                        placeholder={`Define priority ${i + 1}...`}
+                      />
+                      {/* Animated Strikethrough Line */}
+                      <motion.div 
+                        initial={false}
+                        animate={{ width: p.done ? '100%' : '0%' }}
+                        transition={{ duration: 0.3, ease: "easeInOut" }}
+                        className="absolute left-0 top-1/2 -translate-y-1/2 h-[1.5px] bg-slate-300 pointer-events-none"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Focus Timer Panel */}
+            <div className="bg-gradient-to-br from-white/90 to-white/50 backdrop-blur-2xl rounded-3xl p-8 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.06)] border border-white/60 flex flex-col items-center justify-center text-center relative overflow-hidden">
+              
+              {/* Settings Toggle */}
+              <button 
+                onClick={() => setIsEditingTimer(!isEditingTimer)}
+                className="absolute top-5 right-5 p-2 text-slate-300 hover:text-slate-600 transition-colors z-20 outline-none focus-visible:ring-2 focus-visible:ring-slate-200 rounded-full"
+              >
+                <Settings className="w-4 h-4" />
+              </button>
+
+              <span className="text-xs font-bold text-slate-400 tracking-widest uppercase mb-4 relative z-10">
+                {timerMode === 'focus' ? 'Focus Session' : 'Short Break'}
+              </span>
+
+              <div className="text-7xl font-semibold text-slate-900 tabular-nums tracking-tighter mb-8 relative z-10">
+                {String(Math.floor(timerSeconds / 60)).padStart(2, '0')}:{String(timerSeconds % 60).padStart(2, '0')}
+              </div>
+              
+              <AnimatePresence>
+                {isEditingTimer && (
+                  <motion.div 
+                    initial={{ opacity: 0, height: 0, marginBottom: 0 }}
+                    animate={{ opacity: 1, height: 'auto', marginBottom: 32 }}
+                    exit={{ opacity: 0, height: 0, marginBottom: 0 }}
+                    className="flex items-center gap-6 overflow-hidden relative z-10 w-full justify-center"
+                  >
+                    <div className="flex flex-col gap-2 text-center">
+                      <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Focus (min)</label>
+                      <input 
+                        type="number" 
+                        value={focusMinutes} 
+                        onChange={e => handleTimerChange('focus', e.target.value)} 
+                        className="w-20 bg-white/60 border border-slate-200 rounded-xl p-2 text-center font-semibold text-slate-700 outline-none focus:border-slate-400 focus:bg-white transition-colors" 
+                      />
+                    </div>
+                    <div className="flex flex-col gap-2 text-center">
+                      <label className="text-[10px] uppercase font-bold text-slate-400 tracking-wider">Break (min)</label>
+                      <input 
+                        type="number" 
+                        value={breakMinutes} 
+                        onChange={e => handleTimerChange('break', e.target.value)} 
+                        className="w-20 bg-white/60 border border-slate-200 rounded-xl p-2 text-center font-semibold text-slate-700 outline-none focus:border-slate-400 focus:bg-white transition-colors" 
+                      />
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+              
+              <div className="flex items-center gap-4 relative z-10">
+                <button 
+                  onClick={() => { setTimerRunning(!timerRunning); setIsEditingTimer(false); }}
+                  className={cn(
+                    "w-16 h-16 rounded-full flex items-center justify-center transition-all duration-300 shadow-xl outline-none focus-visible:ring-4 focus-visible:ring-slate-200",
+                    timerRunning 
+                      ? "bg-rose-500 text-white shadow-rose-500/20 hover:bg-rose-600" 
+                      : "bg-slate-900 text-white shadow-slate-900/20 hover:scale-105"
+                  )}
+                >
+                  {timerRunning ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current ml-1" />}
+                </button>
+                <button 
+                  onClick={() => { 
+                    setTimerRunning(false); 
+                    setTimerSeconds(timerMode === 'focus' ? focusMinutes * 60 : breakMinutes * 60); 
+                  }}
+                  className="w-12 h-12 rounded-full bg-white/60 border border-slate-100 text-slate-500 flex items-center justify-center hover:bg-slate-100 hover:text-slate-800 transition-colors outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+                  title="Reset Timer"
+                >
+                  <RotateCcw className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+          </div>
+
+          {/* COLUMN 2: HABITS & GRAPH (Span 4) */}
+          <div className="xl:col-span-4 flex flex-col gap-8 h-full">
+            
+            {/* Habit Tracker with Full Month Matrix Grid */}
+            <div className="bg-gradient-to-br from-white/90 to-white/50 backdrop-blur-2xl rounded-3xl p-6 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.06)] border border-white/60 flex-1 overflow-hidden flex flex-col relative">
+              <div className="flex items-center gap-3 mb-6 shrink-0 relative z-10">
+                <Activity className="w-5 h-5 text-slate-400" />
+                <h2 className="text-lg font-semibold text-slate-800 tracking-tight">Routines Matrix</h2>
+              </div>
+              
+              <div className="overflow-x-auto pb-4 scrollbar-hide relative z-10">
+                <table className="w-full text-left border-collapse min-w-max">
+                  <thead>
+                    <tr>
+                      <th className="p-2 min-w-[140px] sm:min-w-[180px] bg-white/90 backdrop-blur-md sticky left-0 z-30 text-[11px] font-bold text-slate-400 uppercase tracking-widest border-b border-slate-100">
+                        Protocol
+                      </th>
+                      {currentMonthDays.map(day => (
+                        <th key={day.day} className="p-1 pb-3 text-center text-[10px] font-semibold text-slate-400 min-w-[32px] border-b border-slate-100">
+                          {String(day.day).padStart(2, '0')}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {habits.map((h) => (
+                      <tr key={h.id} className="group hover:bg-slate-50/40 transition-colors">
+                        <td className="p-2 py-3 bg-white/80 backdrop-blur-md group-hover:bg-slate-50/90 sticky left-0 z-20 transition-colors">
+                          <div className="flex justify-between items-center pr-2">
+                            <div className="flex items-center gap-2.5">
+                              <div className={cn("w-2 h-2 rounded-full", HABIT_COLORS[h.color].bg)} />
+                              <span className="text-sm font-medium text-slate-700 whitespace-nowrap">{h.name}</span>
+                            </div>
+                            <button onClick={() => deleteHabit(h.id)} className="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity focus:opacity-100 outline-none">
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                        {currentMonthDays.map(day => {
+                          const isDone = h.done[day.dateStr];
+                          return (
+                            <td key={day.day} className="p-1 py-3 text-center relative">
+                              {/* Horizontal tracking line helper on hover */}
+                              <div className="absolute inset-y-0 left-0 right-0 border-y border-transparent group-hover:border-slate-100 pointer-events-none -z-10" />
+                              
+                              <button
+                                onClick={() => toggleHabit(h.id, day.dateStr)}
+                                className={cn(
+                                  "w-6 h-6 rounded-[6px] transition-all duration-200 border flex items-center justify-center mx-auto outline-none focus-visible:ring-2",
+                                  HABIT_COLORS[h.color].ring,
+                                  isDone
+                                    ? cn(HABIT_COLORS[h.color].bg, "border-transparent text-white shadow-sm scale-110")
+                                    : day.isToday
+                                      ? "bg-white/60 border-slate-300"
+                                      : "bg-white/40 border-slate-200 hover:border-slate-300 hover:bg-slate-50/80"
+                                )}
+                                title={day.dateStr}
+                              >
+                                  <motion.div
+                                    initial={false}
+                                    animate={{ scale: isDone ? 1 : 0, opacity: isDone ? 1 : 0 }}
+                                    transition={{ type: "spring", stiffness: 400, damping: 25 }}
+                                  >
+                                    <Check className="w-3.5 h-3.5 stroke-[3]" />
+                                  </motion.div>
+                              </button>
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
 
-              {/* Responsive Calendar Grid Wrapper */}
-              <div className="overflow-x-auto">
-                <div className="min-w-[600px] grid grid-cols-7 border-t border-l border-[#222]">
-                  {['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'].map(day => (
-                    <div key={day} className="border-b border-r border-[#222] bg-[#111] p-2 text-center text-[10px] text-gray-500 font-bold tracking-widest">
-                      {day}
-                    </div>
-                  ))}
-                  
-                  {Array.from({ length: firstDayOfMonth }).map((_, i) => (
-                    <div key={`empty-${i}`} className="border-b border-r border-[#222] bg-[#050505]/50 min-h-[80px] sm:min-h-[100px]"></div>
-                  ))}
-                  
-                  {Array.from({ length: daysInMonth }).map((_, i) => {
-                    const day = i + 1;
-                    const dateKey = `${year}-${month}-${day}`;
-                    const dayEvents = events[dateKey] || [];
-                    const isSelected = selectedDay === day;
-                    const isToday = new Date().getDate() === day && new Date().getMonth() === month && new Date().getFullYear() === year;
+              <form 
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!newHabitName.trim()) return;
+                  setHabits(p => [...p, { id: Date.now(), name: newHabitName.trim(), color: newHabitColor, done: {} }]);
+                  setNewHabitName('');
+                }} 
+                className="mt-auto pt-4 flex flex-col gap-3 p-4 bg-white/60 rounded-2xl border border-white/50 shrink-0 relative z-10"
+              >
+                <input
+                  type="text"
+                  value={newHabitName}
+                  onChange={e => setNewHabitName(e.target.value)}
+                  placeholder="Define new routine..."
+                  className="w-full bg-white/80 border border-slate-200 rounded-xl py-2 px-3 text-sm focus:border-slate-400 outline-none transition-all placeholder:text-slate-400 focus:shadow-sm focus:bg-white"
+                />
+                <div className="flex items-center justify-between mt-1 px-1">
+                  <div className="flex items-center gap-3">
+                    {(Object.keys(HABIT_COLORS) as HabitColor[]).map(color => (
+                      <button
+                        key={color}
+                        type="button"
+                        onClick={() => setNewHabitColor(color)}
+                        className={cn(
+                          "w-5 h-5 rounded-full transition-all duration-200 outline-none focus-visible:ring-2 focus-visible:ring-offset-2",
+                          HABIT_COLORS[color].bg,
+                          newHabitColor === color ? "ring-2 ring-offset-2 ring-slate-400 scale-110 shadow-sm" : "opacity-50 hover:opacity-100 hover:scale-105"
+                        )}
+                      />
+                    ))}
+                  </div>
+                  <button type="submit" className="text-xs font-bold text-slate-500 hover:text-slate-900 transition-colors uppercase tracking-wider">
+                    Save
+                  </button>
+                </div>
+              </form>
+            </div>
 
+            {/* Results Graph (Monthly Frequency Stacked) */}
+            <div className="bg-gradient-to-br from-white/90 to-white/50 backdrop-blur-2xl rounded-3xl p-6 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.06)] border border-white/60 shrink-0">
+              <div className="flex items-center gap-3 mb-6">
+                <BarChart3 className="w-5 h-5 text-slate-400" />
+                <h2 className="text-lg font-semibold text-slate-800 tracking-tight">Consistency</h2>
+              </div>
+              
+              <div className="overflow-x-auto scrollbar-hide pb-2">
+                <div className="flex items-end h-36 gap-2 min-w-[500px] border-b border-slate-100 pb-2">
+                  {graphData.map((d) => {
                     return (
-                      <div 
-                        key={day}
-                        onClick={() => setSelectedDay(day)}
-                        className={`min-h-[80px] sm:min-h-[100px] border-b border-r border-[#222] p-2 cursor-pointer transition-all relative group
-                          ${isSelected ? 'bg-[#ccff00]/10 border-[#ccff00]' : 'hover:bg-[#1a1a1a]'}
-                          ${isToday && !isSelected ? 'bg-white text-black' : ''}`}
-                      >
-                        <span className={`font-bebas text-xl sm:text-2xl leading-none block mb-2 ${isToday ? 'text-black' : (isSelected ? 'text-[#ccff00]' : 'text-gray-600 group-hover:text-white')}`}>
-                          {day.toString().padStart(2, '0')}
-                        </span>
-                        
-                        <div className="flex flex-col gap-1">
-                          {dayEvents.map((evt, idx) => {
-                            const isEditing = editingEventId === `${dateKey}-${idx}`;
-
-                            return (
-                              <div key={idx} className={`text-[9px] leading-tight px-1 py-0.5 border-l-2 flex justify-between items-start group/evt
-                                ${isToday ? 'border-black bg-black/10 text-black font-bold' : 'border-[#ccff00] bg-[#111] text-gray-300'}`}>
-                                
-                                {isEditing ? (
-                                  <input
-                                    type="text"
-                                    value={editingEventText}
-                                    onChange={(e) => setEditingEventText(e.target.value)}
-                                    onBlur={() => saveEditEvent(dateKey, idx)}
-                                    onKeyDown={(e) => e.key === 'Enter' && saveEditEvent(dateKey, idx)}
-                                    className="w-full bg-black text-[#ccff00] outline-none border border-[#ccff00] px-1 py-0.5"
-                                    autoFocus
-                                  />
-                                ) : (
-                                  <>
-                                    <span 
-                                      className="truncate pr-1 block cursor-text flex-1" 
-                                      title={evt}
-                                      onDoubleClick={(e) => { e.stopPropagation(); startEditEvent(dateKey, idx, evt); }}
-                                    >
-                                      {evt}
-                                    </span>
-                                    <button 
-                                      onClick={(e) => { e.stopPropagation(); removeEvent(dateKey, idx); }}
-                                      className="opacity-0 group-hover/evt:opacity-100 hover:text-red-500 transition-opacity shrink-0"
-                                      title="Delete Event"
-                                    >
-                                      <X className="w-3 h-3" />
-                                    </button>
-                                  </>
-                                )}
-                              </div>
-                            );
-                          })}
+                      <div key={d.day} className="flex flex-col flex-1 min-w-[16px] items-center gap-2 group cursor-default">
+                        <div className={cn(
+                          "w-full rounded-[4px] transition-all flex-1 flex flex-col-reverse justify-start bg-white/40 overflow-hidden relative",
+                          d.isToday && "ring-1 ring-inset ring-slate-300 bg-white/60"
+                        )}>
+                          {d.completedHabits.map((habit) => (
+                            <motion.div 
+                              layout
+                              key={habit.id}
+                              className={cn(
+                                "w-full transition-all duration-300 ease-out relative border-t border-white/20",
+                                HABIT_COLORS[habit.color].bg
+                              )}
+                              style={{ height: `${(1 / Math.max(maxAchieved, 1)) * 100}%`, minHeight: '8px' }}
+                            />
+                          ))}
+                          
+                          {/* Tooltip */}
+                          <div className="opacity-0 group-hover:opacity-100 absolute -mt-10 left-1/2 -translate-x-1/2 bg-slate-900 text-white text-[10px] font-bold px-2.5 py-1.5 rounded-lg pointer-events-none z-50 whitespace-nowrap shadow-xl transition-opacity duration-200">
+                            {d.completedHabits.length} units
+                          </div>
                         </div>
+                        <span className={cn(
+                          "text-[10px] font-bold",
+                          d.isToday ? "text-slate-900" : "text-slate-400"
+                        )}>
+                          {String(d.day).padStart(2, '0')}
+                        </span>
                       </div>
                     );
                   })}
                 </div>
               </div>
-
-              {selectedDay && (
-                <form onSubmit={addEvent} className="mt-4 flex flex-col sm:flex-row gap-2 border border-[#ccff00] bg-black p-1">
-                  <div className="bg-[#ccff00] text-black font-bold text-xs flex items-center justify-center py-2 sm:py-0 px-2">
-                    INPUT_EVT [{selectedDay.toString().padStart(2, '0')}]
-                  </div>
-                  <input
-                    type="text"
-                    placeholder="ENTER DATA..."
-                    className="flex-1 bg-transparent border border-[#222] sm:border-none text-white text-sm uppercase px-2 py-2 sm:py-1 placeholder-gray-700"
-                    value={newEventText}
-                    onChange={(e) => setNewEventText(e.target.value)}
-                    autoFocus
-                  />
-                  <button type="submit" className="bg-[#111] hover:bg-[#222] text-[#ccff00] px-4 py-2 sm:py-1 text-sm font-bold border border-[#333] transition-colors">
-                    EXEC
-                  </button>
-                </form>
-              )}
             </div>
-          </section>
 
-          {/* COLUMN 2 & 3 CONTAINER (Span 5) */}
-          <div className="xl:col-span-5 flex flex-col gap-6 h-full">
+          </div>
+
+          {/* COLUMN 3: TIMELINE & BRAIN DUMP (Span 4) */}
+          <div className="xl:col-span-4 flex flex-col gap-8">
             
-            {/* PRIORITIES: High Contrast Cards */}
-            <section className="bg-[#0a0a0a] border border-[#333] p-1 stagger-in" style={{ animationDelay: '0.2s' }}>
-              <div className="border border-[#222] p-4 bg-[url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iNDAiIGhlaWdodD0iNDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PGRlZnM+PHBhdHRlcm4gaWQ9ImEiIHdpZHRoPSI0MCIgaGVpZ2h0PSI0MCIgcGF0dGVyblVuaXRzPSJ1c2VyU3BhY2VPblVzZSI+PHBhdGggZD0iTTAgNDBoNDBWMEgweiIgZmlsbD0ibm9uZSIvPjxwb2x5Z29uIHBvaW50cz0iMCA0MCA0MCAwIDQwIDQwIiBmaWxsPSJyZ2JhKDI1NSwyNTUsMjU1LDAuMDEpIi8+PC9wYXR0ZXJuPjwvZGVmcz48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSJ1cmwoI2EpIi8+PC9zdmc+')]">
-                <h2 className="font-bebas text-2xl sm:text-3xl text-white mb-4 flex items-center justify-between border-b border-[#333] pb-2">
-                  <span><span className="text-[#ff3d00]">///</span> PRIORITY_QUEUE</span>
-                  <Activity className="w-5 h-5 text-[#ff3d00]" />
-                </h2>
-                
-                <div className="space-y-3">
-                  {priorities.map((priority, idx) => (
-                    <div key={idx} className="relative group border border-[#333] bg-[#050505] overflow-hidden flex">
-                      <div className="absolute -right-4 -top-6 font-bebas text-6xl sm:text-8xl text-white/5 select-none pointer-events-none group-hover:text-[#ff3d00]/10 transition-colors">
-                        0{idx + 1}
-                      </div>
-                      
-                      <div className="bg-[#111] border-r border-[#333] p-2 sm:p-3 flex items-center justify-center">
-                        <span className="text-[#ff3d00] font-bold text-[10px] sm:text-xs block transform -rotate-90 origin-center whitespace-nowrap tracking-widest w-4">
-                          OBJ.0{idx+1}
-                        </span>
-                      </div>
-                      
-                      <textarea
-                        value={priority}
-                        onChange={(e) => updatePriority(idx, e.target.value)}
-                        placeholder="DEFINE_OBJECTIVE..."
-                        className="flex-1 bg-transparent border-none p-3 sm:p-4 text-white uppercase text-xs sm:text-sm resize-none z-10 font-bold placeholder-gray-700"
-                        rows={2}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </section>
+            <CleanCalendar 
+              selectedDate={selectedDate}
+              onDateSelect={setSelectedDate}
+              events={events}
+            />
 
-            {/* BRAIN DUMP: Raw Terminal */}
-            <section className="bg-[#0a0a0a] border border-[#333] p-1 flex-1 flex flex-col stagger-in" style={{ animationDelay: '0.3s' }}>
-              <div className="border border-[#222] p-4 flex-1 flex flex-col relative bg-black">
-                <div className="absolute top-2 right-2 flex gap-1 z-20">
-                  <div className="w-2 h-2 bg-red-500"></div>
-                  <div className="w-2 h-2 bg-yellow-500"></div>
-                  <div className="w-2 h-2 bg-green-500"></div>
-                </div>
-                
-                <h2 className="font-bebas text-xl sm:text-2xl text-gray-500 mb-4 flex items-center gap-2 relative z-20">
-                  <Terminal className="w-4 h-4" /> dev_null // SCRATCHPAD
-                </h2>
-                
-                {/* Scroll Synchronized Terminal Wrapper */}
-                <div className="flex-1 relative group min-h-[150px] flex overflow-hidden border border-[#222] bg-[#050505]">
-                  <div 
-                    ref={lineNumbersRef}
-                    className="w-6 sm:w-8 shrink-0 bg-[#0a0a0a] border-r border-[#222] text-[#333] font-bold font-mono select-none overflow-hidden terminal-metrics"
-                  >
-                    {Array.from({ length: Math.max(12, notes.split('\n').length + 5) }).map((_, i) => (
-                      <div key={i} className="text-center">{i + 1}</div>
+            {/* Events for Selected Day */}
+            <div className="bg-gradient-to-br from-white/90 to-white/50 backdrop-blur-2xl rounded-3xl p-6 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.06)] border border-white/60 flex flex-col">
+              <h3 className="font-semibold text-slate-800 mb-5 tracking-tight text-lg">
+                {isToday(selectedDate) ? "Today's Schedule" : format(selectedDate, "MMMM do, yyyy")}
+              </h3>
+              
+              <div className="flex-1 flex flex-col gap-3 overflow-y-auto max-h-[220px] scrollbar-hide mb-5">
+                {selectedDayEvents.length === 0 ? (
+                  <div className="text-slate-400 text-sm font-medium py-6 text-center border-2 border-dashed border-slate-200 rounded-2xl bg-white/30">
+                    No events scheduled.
+                  </div>
+                ) : (
+                  <AnimatePresence>
+                    {selectedDayEvents.map((ev, i) => (
+                      <motion.div 
+                        initial={{ opacity: 0, scale: 0.95 }}
+                        animate={{ opacity: 1, scale: 1 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        key={i} 
+                        className="bg-white/60 border border-slate-100 rounded-2xl p-4 flex justify-between items-center text-sm group"
+                      >
+                        <span className="text-slate-700 font-medium">{ev}</span>
+                        <button 
+                          onClick={() => setEvents(p => ({ ...p, [selectedDateKey]: p[selectedDateKey].filter((_, idx) => idx !== i) }))}
+                          className="text-slate-300 hover:text-rose-500 opacity-0 group-hover:opacity-100 transition-opacity focus:opacity-100 outline-none"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+                      </motion.div>
                     ))}
-                  </div>
-                  
-                  <textarea
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    onScroll={handleNotesScroll}
-                    spellCheck="false"
-                    placeholder="// Initialize logic flows here..."
-                    className="flex-1 h-full w-full bg-transparent border-none text-[#00e5ff] resize-none font-plex focus:ring-0 placeholder-[#00e5ff]/30 outline-none terminal-metrics px-3 whitespace-pre overflow-y-auto"
-                  />
-                </div>
+                  </AnimatePresence>
+                )}
               </div>
-            </section>
+
+              <form onSubmit={addEvent} className="relative mt-auto">
+                <input
+                  type="text"
+                  value={newEvent}
+                  onChange={e => setNewEvent(e.target.value)}
+                  placeholder="Add an event..."
+                  className="w-full bg-white/60 border border-slate-100 rounded-2xl py-3.5 pl-5 pr-12 text-sm outline-none focus:bg-white focus:border-slate-300 focus:shadow-sm transition-all placeholder:text-slate-400 font-medium"
+                />
+                <button type="submit" className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-colors shadow-md outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-slate-900">
+                  <Plus className="w-4 h-4 stroke-[3]" />
+                </button>
+              </form>
+            </div>
+
+            {/* Brain Dump */}
+            <div className="bg-gradient-to-br from-white/90 to-white/50 backdrop-blur-2xl rounded-3xl p-6 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.06)] border border-white/60 flex-1 flex flex-col min-h-[220px] relative overflow-hidden">
+              <div className="absolute -bottom-10 -left-10 w-32 h-32 bg-slate-50/50 rounded-full blur-3xl pointer-events-none z-0"></div>
+              
+              <div className="flex items-center gap-3 mb-4 relative z-10">
+                <BrainCircuit className="w-5 h-5 text-slate-400" />
+                <h2 className="text-lg font-semibold text-slate-800 tracking-tight">Brain Dump</h2>
+              </div>
+              
+              <textarea
+                value={notes}
+                onChange={e => setNotes(e.target.value)}
+                placeholder="Offload distracting thoughts here to clear your mind..."
+                className="flex-1 w-full bg-white/60 border border-slate-100 rounded-2xl p-5 text-sm font-medium text-slate-700 placeholder:text-slate-400 outline-none focus:bg-white focus:border-slate-300 focus:shadow-sm transition-all resize-none scrollbar-hide relative z-10 leading-relaxed"
+              />
+            </div>
+
           </div>
-          
-          {/* BOTTOM ROW (TELEMETRY GRAPH + HABIT MATRIX) */}
-          <div className="xl:col-span-12 flex flex-col gap-6">
 
-            {/* NEW GRAPH SECTION */}
-            <section className="bg-[#0a0a0a] border border-[#333] p-1 stagger-in" style={{ animationDelay: '0.4s' }}>
-              <div className="border border-[#222] p-4 bg-black relative">
-                
-                {/* Visual grid behind chart */}
-                <div className="absolute inset-x-4 inset-y-16 flex flex-col justify-between pointer-events-none opacity-20 z-0">
-                  <div className="w-full border-b border-dashed border-[#ccff00]"></div>
-                  <div className="w-full border-b border-dashed border-[#ccff00]"></div>
-                  <div className="w-full border-b border-[#333]"></div>
-                </div>
-
-                <div className="flex flex-wrap gap-2 items-center justify-between mb-4 border-b border-[#333] pb-2 relative z-10">
-                  <h2 className="font-bebas text-2xl sm:text-3xl text-[#ccff00] flex items-center gap-2">
-                    <BarChart2 className="w-5 h-5 text-gray-500" /> TELEMETRY // HABIT_FREQUENCY
-                  </h2>
-                  <div className="text-[10px] text-gray-500 tracking-widest uppercase bg-[#111] px-2 py-1 border border-[#222]">
-                    AXIS_MAX: {yAxisScale} UNITS
-                  </div>
-                </div>
-                
-                {/* Responsive Chart Wrapper */}
-                <div className="overflow-x-auto relative z-10">
-                  <div className="flex items-end h-32 sm:h-40 gap-1 sm:gap-2 pt-4 pb-2 min-w-[600px] xl:min-w-0">
-                    {graphData.map((d) => {
-                      const isToday = new Date().getDate() === d.day && new Date().getMonth() === month && new Date().getFullYear() === year;
-                      
-                      return (
-                        <div key={d.day} className="flex flex-col flex-1 min-w-[20px] sm:min-w-[28px] items-center gap-2 group cursor-crosshair">
-                          <div className={`w-full bg-[#111] border border-[#222] relative flex-1 flex flex-col-reverse justify-start overflow-hidden group-hover:border-[#ccff00] transition-colors ${isToday ? 'border-gray-500' : ''}`}>
-                            {d.completedHabits.map((habit) => (
-                              <div
-                                key={habit.id}
-                                className={`w-full ${CATEGORIES[habit.category].bg} relative border-b border-[#111]/50 opacity-90 hover:opacity-100 transition-opacity`}
-                                style={{ height: `${(1 / yAxisScale) * 100}%`, minHeight: '12px' }}
-                              >
-                              </div>
-                            ))}
-                            
-                            {/* Hover tooltip */}
-                            <div className="opacity-0 group-hover:opacity-100 absolute -top-8 left-1/2 transform -translate-x-1/2 bg-white text-black text-[10px] font-bold px-2 py-1 pointer-events-none z-50 whitespace-nowrap">
-                              {d.count} EXEC
-                            </div>
-                          </div>
-                          <span className={`text-[9px] sm:text-[10px] font-bold ${isToday ? 'text-white bg-white/20 px-1' : 'text-gray-600 group-hover:text-[#ccff00]'}`}>
-                            {d.day.toString().padStart(2, '0')}
-                          </span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            </section>
-
-            {/* HABIT MATRIX */}
-            <section className="bg-[#0a0a0a] border border-[#333] p-1 stagger-in" style={{ animationDelay: '0.5s' }}>
-              <div className="border border-[#222] p-4 overflow-hidden relative">
-                
-                <div className="flex flex-wrap gap-2 items-center justify-between mb-6 border-b border-[#333] pb-4">
-                  <h2 className="font-bebas text-3xl sm:text-4xl text-white flex items-center gap-3">
-                    <Focus className="w-5 h-5 sm:w-6 sm:h-6 text-gray-500" /> MICRO_EXECUTION
-                  </h2>
-                  <div className="text-[10px] sm:text-xs text-gray-500 tracking-widest uppercase border border-[#333] px-2 sm:px-3 py-1 bg-[#111]">
-                    Status: Tracking Active
-                  </div>
-                </div>
-                
-                <div className="overflow-x-auto pb-4">
-                  <table className="w-full text-left border-collapse border-spacing-0 min-w-[800px] xl:min-w-0">
-                    <thead>
-                      <tr>
-                        <th className="p-2 sm:p-3 min-w-[200px] sm:min-w-[250px] border-b border-r border-[#333] bg-[#050505] sticky left-0 z-20 text-[10px] sm:text-xs font-bold text-gray-500 tracking-widest uppercase">
-                          Protocol_Name
-                        </th>
-                        {Array.from({ length: daysInMonth }).map((_, i) => (
-                          <th key={i} className="p-1 sm:p-2 border-b border-[#333] text-center text-[9px] sm:text-[10px] font-bold text-gray-600 min-w-[28px] sm:min-w-[36px] bg-[#111]">
-                            {(i + 1).toString().padStart(2, '0')}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {habits.map((habit) => {
-                        const catStyle = CATEGORIES[habit.category];
-                        return (
-                          <tr key={habit.id} className="group">
-                            <td className="p-0 border-b border-r border-[#222] bg-[#0a0a0a] sticky left-0 z-20 group-hover:bg-[#111] transition-colors">
-                              <div className="flex items-stretch h-full">
-                                <div className={`w-1.5 shrink-0 ${catStyle.bg}`}></div>
-                                <div className="p-2 sm:p-3 flex flex-col justify-center flex-1 relative group/cell">
-                                  {editingHabitId === habit.id ? (
-                                    <input 
-                                      type="text" 
-                                      value={editingHabitName}
-                                      onChange={(e) => setEditingHabitName(e.target.value)}
-                                      onBlur={() => saveEditHabit(habit.id)}
-                                      onKeyDown={(e) => e.key === 'Enter' && saveEditHabit(habit.id)}
-                                      className="bg-black text-[#ccff00] text-[10px] sm:text-xs font-bold uppercase w-full outline-none border border-[#ccff00] px-1 py-0.5"
-                                      autoFocus
-                                    />
-                                  ) : (
-                                    <>
-                                      <span 
-                                        onDoubleClick={() => startEditHabit(habit)}
-                                        className="text-[10px] sm:text-xs font-bold text-white uppercase tracking-wider cursor-text"
-                                        title="Double-click to edit"
-                                      >
-                                        {habit.name}
-                                      </span>
-                                      <span className={`text-[8px] sm:text-[9px] ${catStyle.text} uppercase tracking-widest mt-0.5 font-bold`}>
-                                        [{catStyle.label}]
-                                      </span>
-                                    </>
-                                  )}
-                                  
-                                  <div className="absolute right-2 top-1/2 transform -translate-y-1/2 opacity-0 group-hover/cell:opacity-100 transition-opacity flex gap-1 bg-[#111] pl-2">
-                                     <button onClick={() => deleteHabit(habit.id)} className="text-gray-500 hover:text-[#ff3d00] transition-colors" title="Delete Protocol">
-                                       <X className="w-4 h-4" />
-                                     </button>
-                                  </div>
-                                </div>
-                              </div>
-                            </td>
-                            {Array.from({ length: daysInMonth }).map((_, i) => {
-                              const day = i + 1;
-                              const dateKey = `${year}-${month}-${day}`;
-                              const isCompleted = habit.completed[dateKey];
-                              const isToday = new Date().getDate() === day && new Date().getMonth() === month && new Date().getFullYear() === year;
-                              
-                              return (
-                                <td key={day} className={`p-1 sm:p-1.5 border-b border-[#222] text-center group-hover:bg-[#111]/50 ${isToday ? 'bg-white/5' : ''}`}>
-                                  <button
-                                    onClick={() => toggleHabit(habit.id, day)}
-                                    className={`w-full aspect-square border transition-all flex items-center justify-center relative overflow-hidden
-                                      ${isCompleted 
-                                        ? `${catStyle.bg} border-transparent` 
-                                        : 'border-[#333] bg-black hover:border-gray-500'}`}
-                                  >
-                                    {isCompleted && (
-                                      <div className="absolute inset-0 bg-white/20"></div> // Subtle shine on filled box
-                                    )}
-                                    {!isCompleted && isToday && (
-                                      <div className="w-1 h-1 bg-[#333] rounded-full"></div> // Indicator for today's empty box
-                                    )}
-                                  </button>
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* ADD NEW PROTOCOL FORM */}
-                <form onSubmit={addHabit} className="mt-4 flex flex-col sm:flex-row gap-2 border border-[#333] bg-[#050505] p-2">
-                  <div className="bg-[#111] text-gray-500 font-bold text-[10px] flex items-center justify-center px-3 tracking-widest uppercase border border-[#222]">
-                    + NEW_PROTOCOL
-                  </div>
-                  <select 
-                    value={newHabitCategory}
-                    onChange={(e) => setNewHabitCategory(e.target.value as CategoryKey)}
-                    className="bg-black border border-[#222] text-white text-[10px] font-bold px-2 py-2 sm:py-1 uppercase focus:border-[#ccff00] outline-none"
-                  >
-                    {Object.values(CATEGORIES).map(cat => (
-                      <option key={cat.id} value={cat.id}>{cat.label}</option>
-                    ))}
-                  </select>
-                  <input
-                    type="text"
-                    placeholder="ENTER PROTOCOL NAME..."
-                    className="flex-1 bg-black border border-[#222] text-white text-xs uppercase px-3 py-2 sm:py-1 placeholder-gray-700 focus:border-[#ccff00] outline-none"
-                    value={newHabitName}
-                    onChange={(e) => setNewHabitName(e.target.value)}
-                  />
-                  <button type="submit" className="bg-[#222] hover:bg-[#ccff00] text-gray-400 hover:text-black px-6 py-2 sm:py-1 text-xs font-bold transition-colors border border-[#333] hover:border-[#ccff00]">
-                    INJECT
-                  </button>
-                </form>
-
-              </div>
-            </section>
-          </div>
-          
         </div>
-
-        {/* CUSTOM FOOTER */}
-        <footer className="mt-8 mb-4 text-center stagger-in" style={{ animationDelay: '0.6s' }}>
-          <div className="border-t border-[#333] pt-6 max-w-2xl mx-auto flex flex-col items-center justify-center gap-3">
-            <p className="text-gray-400 text-xs sm:text-sm font-bold uppercase tracking-widest flex items-center gap-2">
-              MADE WITH <span className="text-[#ff00a0]">❤️</span> BY 
-              <a href="https://vanshcodeworks.com" target="_blank" rel="noopener noreferrer" className="text-[#00e5ff] hover:text-[#ccff00] transition-colors underline decoration-dotted underline-offset-4">
-                VANSHCODEWORKS
-              </a>
-            </p>
-            <p className="text-[#555] text-[10px] font-mono tracking-widest bg-[#111] px-3 py-1 border border-[#222]">
-              // ENGINEERED FOR ADHD SUFFERING PEOPLE // STAY FOCUSED //
-            </p>
-          </div>
-        </footer>
-
       </div>
     </div>
   );
